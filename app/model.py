@@ -23,8 +23,3 @@ class AutoEncoder(torch.nn.Module):
         c0 = torch.zeros(self.layer_dim, x.size(0), self.timesteps).requires_grad_()
         out, (hn, cn) = self.decoder(latent, (h0.detach(), c0.detach()))
         return out
-
-input_dim = 3
-hidden_dim = 64
-layer_dim = 2
-model = AutoEncoder(input_dim, hidden_dim, layer_dim)
