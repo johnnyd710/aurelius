@@ -1,26 +1,44 @@
-# third party
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
-# local imports
 from model import AutoEncoder
-from utils import MinMaxScaler, sine_data_generation
+import random
 
-TIMESTEPS = 100
-ENCODING_DIM = 64
-HIDDEN_DIM = 7
+SEQ_LEN = 60
+HIDDEN_DIM = 64
+BATCH_SIZE = 16
+N_FEATURES = 1
+
+    batch_size = 16
+    seq_len = 32
+    noise_dim = 100
+    seq_dim = 4
 
 device = torch.device('cpu')
+
+def normalize(x: np.array, _max: int, _min: int):
+  return (x - _min) / (_max - _min)
 
 class MyDataset(torch.utils.data.Dataset):
   """Some Information about MyDataset"""
   def __init__(self, timeseries: np.array, timesteps: int):
     super(MyDataset, self).__init__()
-    timeseries = MinMaxScaler(timeseries)
-    self.X = torch.Tensor(timeseries).squeeze()
+    self._min = timeseries.min()
+    self._max = timeseries.max()
+    timeseries = normalize(timeseries, self._max, self._min)
+    X = self.temporalize(
+      X = timeseries,
+      lookback=timesteps
+    )
+    self.X = torch.Tensor(X)
 
   def __getitem__(self, index):
     return self.X[index]
+
+  def getMax(self):
+    return self._max
+
+  def getMin(self):
+    return self._min
 
   def __len__(self):
     return self.X.shape[0]
@@ -36,12 +54,14 @@ class MyDataset(torch.utils.data.Dataset):
         output_X = np.append(output_X, t)
     return output_X.reshape(X.shape[0] - lookback + 1, 1, lookback)
 
-# exponential = [(2*x + (x * random.randint(-15, 15)/100)) for x in range(1000)]
-sine = sine_data_generation(1000, TIMESTEPS, 1)
-timeseries = np.array(sine)
+exponential = [(x**2/100 + (x * random.randint(-15, 15)/100)) for x in range(1000)]
+timeseries = np.array(
+  exponential
+)
 
-model = AutoEncoder(TIMESTEPS, ENCODING_DIM, [HIDDEN_DIM])
-model.to(device)
+# Create generator and discriminator models
+netD = LSTMDiscriminator(in_dim=in_dim, device=device).to(device)
+netG = LSTMGenerator(in_dim=in_dim, out_dim=in_dim, device=device).to(device)
 
 dataset = MyDataset(timeseries, TIMESTEPS)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
@@ -53,15 +73,14 @@ for epoch in range(100):
   running_loss = 0.0
   for i, data in enumerate(dataloader):
     inputs = data
-    inputs: torch.Tensor = inputs.to(device)
+    inputs = inputs.to(device)
 
     # zero the parameter gradients
     optimizer.zero_grad()
 
     # forward + backward + optimize
-    # inputs = inputs.squeeze(0)
     outputs = model(inputs)
-    outputs = outputs.squeeze()
+    outputs = outputs.view(1,1,TIMESTEPS)
     loss = criterion(outputs, inputs)
     loss.backward()
     optimizer.step()
@@ -73,13 +92,7 @@ for epoch in range(100):
 
 model.eval()
 
-more_sines = sine_data_generation(20, TIMESTEPS, 1)
-more_sines = MinMaxScaler(more_sines)
-for sin in more_sines:
-  sin = torch.tensor(sin).transpose(0,1).float()
-  out: torch.Tensor = model.forward(sin)
-  print("\n\ntest = ", sin, "\nOut = ", out)
-  plt.plot(sin.squeeze().data, label = 'original')
-  plt.plot(out.squeeze().data, label = 'model out')
-  plt.legend()
-  plt.show()
+test = np.array([20**2/100, 21**2/100, 22**2/100])
+test = normalize(test, dataset.getMax(), dataset.getMin())
+test = torch.Tensor(test).view(1,1,TIMESTEPS)
+print("test = ", test, "Out = ", model.forward(test))
