@@ -7,9 +7,8 @@ from model import AutoEncoder
 from utils import MinMaxScaler, sine_data_generation
 
 TIMESTEPS = 100
-ENCODING_DIM = 64
-HIDDEN_DIM = 7
-
+ENCODING_DIM = 7
+HIDDEN_DIM = 64
 device = torch.device('cpu')
 
 class MyDataset(torch.utils.data.Dataset):
