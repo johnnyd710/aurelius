@@ -1,11 +1,14 @@
 # third party
 import torch
+from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
 # local imports
 from model import AutoEncoder
 from utils import MinMaxScaler, sine_data_generation
 
+RESTORE = True
+EPOCHS = 30
 TIMESTEPS = 100
 ENCODING_DIM = 7
 HIDDEN_DIM = 64
@@ -45,10 +48,14 @@ model.to(device)
 dataset = MyDataset(timeseries, TIMESTEPS)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-criterion = torch.nn.L1Loss(reduction='sum')
+criterion = nn.MSELoss()
+
+if RESTORE:
+  model.load_state_dict(torch.load('checkpoint.pt'))
+  optimizer.load_state_dict(torch.load('optimizer-checkpoint.pt'))
 
 # loop over the dataset multiple timese
-for epoch in range(100):
+for epoch in range(EPOCHS):
   running_loss = 0.0
   for i, data in enumerate(dataloader):
     inputs = data
@@ -67,12 +74,15 @@ for epoch in range(100):
 
     running_loss += loss.item()
   
+  print("Epoch {:d} complete out of {:d}".format(epoch+1, EPOCHS))
   print("Loss: {}".format(running_loss))
+  torch.save(model.state_dict(), 'checkpoint.pt')
+  torch.save(optimizer.state_dict(), 'optimizer-checkpoint.pt')
 
 
 model.eval()
 
-more_sines = sine_data_generation(20, TIMESTEPS, 1)
+more_sines = sine_data_generation(5, TIMESTEPS, 1)
 more_sines = MinMaxScaler(more_sines)
 for sin in more_sines:
   sin = torch.tensor(sin).transpose(0,1).float()
