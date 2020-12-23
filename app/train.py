@@ -4,14 +4,15 @@ from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
 # local imports
-from model import AutoEncoder
+from model import VarationalAutoencoder
 from utils import MinMaxScaler, sine_data_generation
 
 RESTORE = True
-EPOCHS = 30
+EPOCHS = 10
 TIMESTEPS = 100
 ENCODING_DIM = 7
 HIDDEN_DIM = 64
+LATENT_SIZE = 7
 device = torch.device('cpu')
 
 class MyDataset(torch.utils.data.Dataset):
@@ -42,7 +43,7 @@ class MyDataset(torch.utils.data.Dataset):
 sine = sine_data_generation(1000, TIMESTEPS, 1)
 timeseries = np.array(sine)
 
-model = AutoEncoder(TIMESTEPS, ENCODING_DIM, [HIDDEN_DIM])
+model = VarationalAutoencoder(TIMESTEPS, ENCODING_DIM, LATENT_SIZE, [HIDDEN_DIM])
 model.to(device)
 
 dataset = MyDataset(timeseries, TIMESTEPS)
