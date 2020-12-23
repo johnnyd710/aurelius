@@ -75,6 +75,7 @@ class VarationalAutoencoder(nn.Module):
                                h_activ)
         self.latent_size = latent_size
         self.batch_size = batch_size
+        self.input_dim = input_dim
         self.encoding_to_mu = nn.Linear(encoding_dim, latent_size)
         self.encoding_to_var = nn.Linear(encoding_dim, latent_size)
         self.latent_to_encoding = nn.Linear(latent_size, encoding_dim)
@@ -91,3 +92,14 @@ class VarationalAutoencoder(nn.Module):
         x = self.decoder(x, seq_len)
 
         return x
+
+    def sample(self) -> torch.Tensor:
+        """
+        Samples from the latent space and return the corresponding
+        image space map.
+        :return: (Tensor)
+        """
+        z = torch.randn([1, self.latent_size])
+        x = self.latent_to_encoding(z)
+        samples = self.decoder(x, 1)
+        return samples
