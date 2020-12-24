@@ -8,11 +8,12 @@ from model import VarationalAutoencoder
 from utils import MinMaxScaler, sine_data_generation
 
 RESTORE = True
-EPOCHS = 10
+EPOCHS = 100
 TIMESTEPS = 100
 ENCODING_DIM = 7
 HIDDEN_DIM = 64
 LATENT_SIZE = 7
+PI = 3.14
 device = torch.device('cpu')
 
 class MyDataset(torch.utils.data.Dataset):
@@ -40,7 +41,11 @@ class MyDataset(torch.utils.data.Dataset):
     return output_X.reshape(X.shape[0] - lookback + 1, 1, lookback)
 
 # exponential = [(2*x + (x * random.randint(-15, 15)/100)) for x in range(1000)]
-sine = sine_data_generation(1000, TIMESTEPS, 1)
+sine = sine_data_generation(10000,
+  TIMESTEPS,
+  1,
+  frequency=[0, 0.1],
+  phase=[0, 7])
 timeseries = np.array(sine)
 
 model = VarationalAutoencoder(TIMESTEPS, ENCODING_DIM, LATENT_SIZE, [HIDDEN_DIM])

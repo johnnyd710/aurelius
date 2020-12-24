@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def sine_data_generation (no, seq_len, dim):
+def sine_data_generation (no, seq_len, dim, frequency = [0, 1], phase = [0, 1]):
   """Sine data generation.
   
   Args:
@@ -22,11 +22,11 @@ def sine_data_generation (no, seq_len, dim):
     # For each feature
     for k in range(dim):
       # Randomly drawn frequency and phase
-      freq = np.random.uniform(0, 0.1)            
-      phase = np.random.uniform(0, 0.1)
+      f = np.random.uniform(frequency[0], frequency[1])            
+      p = np.random.uniform(phase[0], phase[1])
           
       # Generate sine signal based on the drawn frequency and phase
-      temp_data = [np.sin(freq * j + phase) for j in range(seq_len)] 
+      temp_data = [np.sin(f * j + p) for j in range(seq_len)] 
       temp.append(temp_data)
         
     # Align row/column
