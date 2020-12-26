@@ -40,6 +40,30 @@ class HeatExchanger:
     self.CSOutTemp.step()
     self.HSFlow.step()
 
+  def increaseVariable(self, name, value):
+    if name == 'HSInTemp':
+      self.HSInTemp.ambient += value
+    elif name == 'HSOutTemp':
+      self.HSOutTemp.ambient += value
+    elif name == 'CSInTemp':
+      self.CSInTemp.ambient += value
+    elif name == 'CSOutTemp':
+      self.CSOutTemp.ambient += value
+    elif name == 'HSFlow':
+      self.HSFlow.ambient += value
+
+  def decreaseVariable(self, name, value):
+    if name == 'HSInTemp':
+      self.HSInTemp.ambient -= value
+    elif name == 'HSOutTemp':
+      self.HSOutTemp.ambient -= value
+    elif name == 'CSInTemp':
+      self.CSInTemp.ambient -= value
+    elif name == 'CSOutTemp':
+      self.CSOutTemp.ambient -= value
+    elif name == 'HSFlow':
+      self.HSFlow.ambient -= value
+
   def __str__(self) -> str:
     return f"""
     Hot Side In Temperature: {self.HSInTemp} \n
@@ -69,4 +93,7 @@ if __name__ == "__main__":
   heatExchanger.step()
   print(heatExchanger)
   heatExchanger.step()
+  print(heatExchanger)
+  heatExchanger.increaseVariable('HSOutTemp', 100)
+  heatExchanger.decreaseVariable('HSOutTemp', 100)
   print(heatExchanger)
