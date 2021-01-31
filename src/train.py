@@ -4,17 +4,22 @@ from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
 # local imports
-from model import VarationalAutoencoder
-from utils import MinMaxScaler, sine_data_generation
+from autoencoder import VarationalAutoencoder
+from utils import MinMaxScaler, sine_data_generation, SoftDTW
 
-RESTORE = True
-EPOCHS = 100
+RESTORE = False
+EPOCHS = 10
 TIMESTEPS = 100
 ENCODING_DIM = 7
 HIDDEN_DIM = 64
 LATENT_SIZE = 7
 PI = 3.14
-device = torch.device('cpu')
+if torch.cuda.is_available():
+  print('using gpu...')
+  device = "cuda:0" 
+else:  
+  print('using cpu...')
+  device = "cpu"  
 
 class MyDataset(torch.utils.data.Dataset):
   """Some Information about MyDataset"""
@@ -54,7 +59,8 @@ model.to(device)
 dataset = MyDataset(timeseries, TIMESTEPS)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-criterion = nn.MSELoss()
+# criterion = nn.MSELoss()
+criterion = SoftDTW(gamma=1.0, normalize=False)
 
 if RESTORE:
   model.load_state_dict(torch.load('checkpoint.pt'))
