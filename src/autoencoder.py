@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 class Encoder(nn.Module):
     def __init__(self, input_dim, out_dim, h_dims, h_activ, out_activ):
         super(Encoder, self).__init__()
@@ -64,9 +65,11 @@ class Decoder(nn.Module):
 
 
 class VarationalAutoencoder(nn.Module):
-    def __init__(self, input_dim, encoding_dim, latent_size, h_dims=[], h_activ=nn.Sigmoid(),
-                 out_activ=nn.Tanh(),
-                 batch_size=1):
+    def __init__(
+        self,
+        input_dim, encoding_dim, latent_size, h_dims=[],
+        h_activ=nn.Sigmoid(), out_activ=nn.Tanh(), batch_size=1
+    ):
         super(VarationalAutoencoder, self).__init__()
 
         self.encoder = Encoder(input_dim, encoding_dim, h_dims, h_activ,
@@ -85,8 +88,8 @@ class VarationalAutoencoder(nn.Module):
         x = self.encoder(x)
         mean = self.encoding_to_mu(x)
         logvar = self.encoding_to_var(x)
-        std = torch.exp(0.5 * logvar)
-        z = torch.randn([self.batch_size, self.latent_size])
+        std = torch.exp(0.5 * logvar).to(device='cuda:0')
+        z = torch.randn([self.batch_size, self.latent_size]).to(device='cuda:0')
         z = z * std + mean
         x = self.latent_to_encoding(z)
         x = self.decoder(x, seq_len)

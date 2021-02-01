@@ -5,9 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 # local imports
 from autoencoder import VarationalAutoencoder
-from utils import MinMaxScaler, sine_data_generation, SoftDTW
+from utils import MinMaxScaler, sine_data_generation
+from sdtw import SoftDTWLoss
 
-RESTORE = False
+RESTORE = True
 EPOCHS = 10
 TIMESTEPS = 100
 ENCODING_DIM = 7
@@ -46,10 +47,10 @@ class MyDataset(torch.utils.data.Dataset):
     return output_X.reshape(X.shape[0] - lookback + 1, 1, lookback)
 
 # exponential = [(2*x + (x * random.randint(-15, 15)/100)) for x in range(1000)]
-sine = sine_data_generation(10000,
+sine = sine_data_generation(1000,
   TIMESTEPS,
   1,
-  frequency=[0, 0.1],
+  frequency=[0, 1],
   phase=[0, 7])
 timeseries = np.array(sine)
 
@@ -60,7 +61,7 @@ dataset = MyDataset(timeseries, TIMESTEPS)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 # criterion = nn.MSELoss()
-criterion = SoftDTW(gamma=1.0, normalize=False)
+criterion = SoftDTWLoss(gamma=1.0)
 
 if RESTORE:
   model.load_state_dict(torch.load('checkpoint.pt'))
@@ -79,8 +80,8 @@ for epoch in range(EPOCHS):
     # forward + backward + optimize
     # inputs = inputs.squeeze(0)
     outputs = model(inputs)
-    outputs = outputs.squeeze()
-    loss = criterion(outputs, inputs)
+    outputs = outputs.unsqueeze(1)
+    loss = criterion(outputs, inputs.unsqueeze(1))
     loss.backward()
     optimizer.step()
 
@@ -97,10 +98,10 @@ model.eval()
 more_sines = sine_data_generation(5, TIMESTEPS, 1)
 more_sines = MinMaxScaler(more_sines)
 for sin in more_sines:
-  sin = torch.tensor(sin).transpose(0,1).float()
+  sin = torch.tensor(sin).transpose(0,1).float().to(device='cuda:0')
   out: torch.Tensor = model.forward(sin)
   print("\n\ntest = ", sin, "\nOut = ", out)
-  plt.plot(sin.squeeze().data, label = 'original')
-  plt.plot(out.squeeze().data, label = 'model out')
+  plt.plot(sin.cpu().squeeze().data, label = 'original')
+  plt.plot(out.cpu().squeeze().data, label = 'model out')
   plt.legend()
   plt.show()
