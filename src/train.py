@@ -6,15 +6,17 @@ import matplotlib.pyplot as plt
 # local imports
 from autoencoder import VarationalAutoencoder
 from utils import MinMaxScaler, sine_data_generation
-from sdtw import SoftDTWLoss
+from sdtw import SoftDTW
 
 RESTORE = True
-EPOCHS = 10
+EPOCHS = 100
 TIMESTEPS = 100
 ENCODING_DIM = 7
 HIDDEN_DIM = 64
 LATENT_SIZE = 7
 PI = 3.14
+FREQUENCY=[0.2, 0.5]
+PHASE=[0,7]
 if torch.cuda.is_available():
   print('using gpu...')
   device = "cuda:0" 
@@ -50,8 +52,8 @@ class MyDataset(torch.utils.data.Dataset):
 sine = sine_data_generation(1000,
   TIMESTEPS,
   1,
-  frequency=[0, 1],
-  phase=[0, 7])
+  frequency=FREQUENCY,
+  phase=PHASE)
 timeseries = np.array(sine)
 
 model = VarationalAutoencoder(TIMESTEPS, ENCODING_DIM, LATENT_SIZE, [HIDDEN_DIM])
@@ -61,7 +63,7 @@ dataset = MyDataset(timeseries, TIMESTEPS)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 # criterion = nn.MSELoss()
-criterion = SoftDTWLoss(gamma=1.0)
+criterion = SoftDTW(use_cuda=True, gamma=0.1, normalize=True)
 
 if RESTORE:
   model.load_state_dict(torch.load('checkpoint.pt'))
@@ -95,7 +97,13 @@ for epoch in range(EPOCHS):
 
 model.eval()
 
-more_sines = sine_data_generation(5, TIMESTEPS, 1)
+more_sines = sine_data_generation(
+  5,
+  TIMESTEPS,
+  1,
+  frequency=FREQUENCY,
+  phase=PHASE
+)
 more_sines = MinMaxScaler(more_sines)
 for sin in more_sines:
   sin = torch.tensor(sin).transpose(0,1).float().to(device='cuda:0')

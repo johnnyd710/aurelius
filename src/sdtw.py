@@ -1,297 +1,428 @@
+# MIT License
+#
+# Copyright (c) 2020 Mehran Maghoumi
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ----------------------------------------------------------------------------------------------------------------------
+
+import numpy as np
 import torch
-from math import inf
+import torch.cuda
+from numba import jit
+from torch.autograd import Function
+from numba import cuda
+import math
 
-'''
-Author : Luke Y. Prince
-email  : luke.prince@utoronto.ca
-github : lyprince
-date   : 19 Feb 2019
-'''
+# ----------------------------------------------------------------------------------------------------------------------
+@cuda.jit
+def compute_softdtw_cuda(D, gamma, bandwidth, max_i, max_j, n_passes, R):
+    """
+    :param seq_len: The length of the sequence (both inputs are assumed to be of the same size)
+    :param n_passes: 2 * seq_len - 1 (The number of anti-diagonals)
+    """
+    # Each block processes one pair of examples
+    b = cuda.blockIdx.x
+    # We have as many threads as seq_len, because the most number of threads we need
+    # is equal to the number of elements on the largest anti-diagonal
+    tid = cuda.threadIdx.x
 
-class SoftDTWLoss(torch.nn.Module):
-    '''
-    Soft-DTW (Dynamic Time Warping) Loss function as defined in Cuturi and Blondel (2017) Soft-DTW:
-    a Differentiable Loss Function for Time-Series. In: Proc. of ICML 2017. 
-    https://arxiv.org/abs/1703.01541.
-    '''
-    
-    def __init__(self, gamma=1.0, spatial_independent=False, bandwidth=None):
-        '''
-        __init__(self, gamma=1.0, spatial_independent=False):
-        
-        Arguments:
-            gamma (float) : smoothing parameter (default=1.0)
-            spatial_independent (bool) : argument to treat spatial dimensions as independent (default=False)
-                                         When false, each time point x_t is treated as a vector in multi-dimensional
-                                         space. When true, each time point x_t is treated as a set of independent scalars
-                                         x_i,t. This is a short-cut for creating a 'false' singular spatial dimension such
-                                         that data can continue to be treated as a 3-tensor of size (batch x space x time).
-                                         TODO: implement for arbitrary spatial dimensions.
-            bandwidth (int) : apply Sakoe-Chiba constraint
-        '''
-        
-        super(SoftDTWLoss, self).__init__()
-        
-        self.gamma               = gamma
-        self.spatial_independent = spatial_independent
-        self.bandwidth           = bandwidth
-        
-    def forward(self, x, y):
-        '''
-        forward(self, x, y):
-        
-        Arguments:
-            x (torch.Tensor): Time series data of size (batch_dim x space_dim x x_time_dim)
-            y (torch.Tensor): Time series data of size (batch_dim x space_dim x y_time_dim)
-            
-        Returns:
-            loss (torch.Tensor): Loss for each data point in batch. Size = batch_dim
-        '''
-        
-        return SoftDTWLossFunction.apply(x, y, (self.gamma, self.spatial_independent, self.bandwidth))
+    # Compute I, J, the indices from [0, seq_len)
 
-class SoftDTWLossFunction(torch.autograd.Function):
-    '''
-    Custom autograd function for Soft DTW.
-    
-    See https://pytorch.org/tutorials/beginner/pytorch_with_examples.html#pytorch-defining-new-autograd-functions
-    for details on defining new autograd functions
-    '''    
-    
+    # The row index is always the same as tid
+    I = tid
+
+    inv_gamma = 1.0 / gamma
+
+    # Go over each anti-diagonal. Only process threads that fall on the current on the anti-diagonal
+    for p in range(n_passes):
+
+        # The index is actually 'p - tid' but need to force it in-bounds
+        J = max(0, min(p - tid, max_j - 1))
+
+        # For simplicity, we define i, j which start from 1 (offset from I, J)
+        i = I + 1
+        j = J + 1
+
+        # Only compute if element[i, j] is on the current anti-diagonal, and also is within bounds
+        if I + J == p and (I < max_i and J < max_j):
+            # Don't compute if outside bandwidth
+            if not (abs(i - j) > bandwidth > 0):
+                r0 = -R[b, i - 1, j - 1] * inv_gamma
+                r1 = -R[b, i - 1, j] * inv_gamma
+                r2 = -R[b, i, j - 1] * inv_gamma
+                rmax = max(max(r0, r1), r2)
+                rsum = math.exp(r0 - rmax) + math.exp(r1 - rmax) + math.exp(r2 - rmax)
+                softmin = -gamma * (math.log(rsum) + rmax)
+                R[b, i, j] = D[b, i - 1, j - 1] + softmin
+
+        # Wait for other threads in this block
+        cuda.syncthreads()
+
+# ----------------------------------------------------------------------------------------------------------------------
+@cuda.jit
+def compute_softdtw_backward_cuda(D, R, inv_gamma, bandwidth, max_i, max_j, n_passes, E):
+    k = cuda.blockIdx.x
+    tid = cuda.threadIdx.x
+
+    # Indexing logic is the same as above, however, the anti-diagonal needs to
+    # progress backwards
+    I = tid
+
+    for p in range(n_passes):
+        # Reverse the order to make the loop go backward
+        rev_p = n_passes - p - 1
+
+        # convert tid to I, J, then i, j
+        J = max(0, min(rev_p - tid, max_j - 1))
+
+        i = I + 1
+        j = J + 1
+
+        # Only compute if element[i, j] is on the current anti-diagonal, and also is within bounds
+        if I + J == rev_p and (I < max_i and J < max_j):
+
+            if math.isinf(R[k, i, j]):
+                R[k, i, j] = -math.inf
+
+            # Don't compute if outside bandwidth
+            if not (abs(i - j) > bandwidth > 0):
+                a = math.exp((R[k, i + 1, j] - R[k, i, j] - D[k, i + 1, j]) * inv_gamma)
+                b = math.exp((R[k, i, j + 1] - R[k, i, j] - D[k, i, j + 1]) * inv_gamma)
+                c = math.exp((R[k, i + 1, j + 1] - R[k, i, j] - D[k, i + 1, j + 1]) * inv_gamma)
+                E[k, i, j] = E[k, i + 1, j] * a + E[k, i, j + 1] * b + E[k, i + 1, j + 1] * c
+
+        # Wait for other threads in this block
+        cuda.syncthreads()
+
+# ----------------------------------------------------------------------------------------------------------------------
+class _SoftDTWCUDA(Function):
+    """
+    CUDA implementation is inspired by the diagonal one proposed in https://ieeexplore.ieee.org/document/8400444:
+    "Developing a pattern discovery method in time series data and its GPU acceleration"
+    """
+
     @staticmethod
-    def forward(ctx, x, y, params):
-        
-        '''
-        @staticmethod
-        forward(ctx, x, y, params):
-        
-        Compute the forward pass for Soft-DTW, storing intermediate alignment costs R, and Squared Euclidean
-        Distance costs D for use in the backward pass. See algorithm 1 in https://arxiv.org/abs/1703.01541
-        
-        Arguments:
-            ctx : context
-            x (torch.Tensor) : tensor of dimensions (batch_dim x space_dim x x_time_dim)
-            y (torch.Tensor) : tensor of dimensions (batch_dim x space_dim x y_time_dim)
-            
-        Returns:
-            SoftDTW_Loss (torch.Tensor)
-        '''
-        
-        # Store parameters in context variable
-        
-        gamma, spatial_independent, bandwidth = params
-        ctx.gamma = gamma
-        ctx.spatial_independent = spatial_independent
-        ctx.bandwidth = bandwidth
-        
-        # Determine device and store in context variable
-        ctx.device = 'cuda' if x.is_cuda else 'cpu'
-        
-        # Determine dimensions
-        x_batch_dim, x_space_dim, x_time_dim = x.shape
-        y_batch_dim, y_space_dim, y_time_dim = y.shape
-        
-        # Store dimensions in context variable
-        ctx.x_time_dim = x_time_dim
-        ctx.y_time_dim = y_time_dim
-        
-        # Check batch dimensions are equal
-        if x_batch_dim == y_batch_dim:
-            batch_dim = x_batch_dim
-            ctx.batch_dim = batch_dim
-            del x_batch_dim, y_batch_dim
-        else:
-            raise RuntimeError('Unequal batch dimensions')
-            
-        # Check space dimensions are equal
-        if x_space_dim == y_space_dim:
-            space_dim = x_space_dim
-            ctx.space_dim = space_dim
-            del x_space_dim, y_space_dim
-        else:
-            raise RuntimeError('Unequal space dimensions')
-        
-        # Determine dimensions for Squared Euclidean Distance Gram Matrix
-        # +1 because padding needed at the end for backward function
-        D_dims = (batch_dim, x_time_dim + 1, y_time_dim + 1, space_dim) \
-        if spatial_independent else (batch_dim, x_time_dim + 1, y_time_dim + 1)
-        
-        # Determine dimensions for Soft-DTW Distance Gram Matrix. 
-        # +2 because padding needed either side for forward and backward function
-        R_dims = (batch_dim, x_time_dim + 2, y_time_dim + 2, space_dim) \
-        if spatial_independent else (batch_dim, x_time_dim + 2, y_time_dim + 2)
-        
-        # Create Gram Matrices
-        D = torch.zeros(D_dims).to(ctx.device)
-        R = torch.ones(R_dims).to(ctx.device)*inf
-                
-        # Initialize edges of Soft-DTW Gram Matrix
-        R[:, 0, 0]  = 0
-        
-        niters = x_time_dim + y_time_dim + 2
-        
-        # Sweep diagonally through Gram Matrices to compute alignment costs. 
-        # See https://towardsdatascience.com/gpu-optimized-dynamic-programming-8d5ba3d7064f for inspiration
-        for (i,j),(ip1,jp1) in zip(MatrixDiagonalIndexIterator(m = x_time_dim, n = y_time_dim, bandwidth=bandwidth),
-                                   MatrixDiagonalIndexIterator(m = x_time_dim + 1, n= y_time_dim + 1, k_start=1,
-                                                               bandwidth=bandwidth)):
-            
-            # Compute Squared Euclidean Distance
-            if spatial_independent:
-                D[:, i, j] = (x[:, :, i] - y[:, :, j]).permute(0, 2, 1).pow(2)
-            else:
-                D[:, i, j] = (x[:, :, i] - y[:, :, j]).permute(0, 2, 1).pow(2).sum(dim=-1)
-            
-            # Add soft minimum alignment costs
-            R[:, ip1, jp1] = D[:, i, j] + softmin([R[:, i, j],
-                                                   R[:, ip1, j],
-                                                   R[:, i, jp1]],
-                                                   gamma=1.0)
-        ctx.save_for_backward(x, y)
-        ctx.R = R
-        ctx.D = D
-        return R[:, -2, -2].sum(dim=-1) if spatial_independent else R[:, -2, -2]
-    
+    def forward(ctx, D, gamma, bandwidth):
+        dev = D.device
+        dtype = D.dtype
+        gamma = torch.cuda.FloatTensor([gamma])
+        bandwidth = torch.cuda.FloatTensor([bandwidth])
+
+        B = D.shape[0]
+        N = D.shape[1]
+        M = D.shape[2]
+        threads_per_block = max(N, M)
+        n_passes = 2 * threads_per_block - 1
+
+        # Prepare the output array
+        R = torch.ones((B, N + 2, M + 2), device=dev, dtype=dtype) * math.inf
+        R[:, 0, 0] = 0
+
+        # Run the CUDA kernel.
+        # Set CUDA's grid size to be equal to the batch size (every CUDA block processes one sample pair)
+        # Set the CUDA block size to be equal to the length of the longer sequence (equal to the size of the largest diagonal)
+        compute_softdtw_cuda[B, threads_per_block](cuda.as_cuda_array(D.detach()),
+                                                   gamma.item(), bandwidth.item(), N, M, n_passes,
+                                                   cuda.as_cuda_array(R))
+        ctx.save_for_backward(D, R, gamma, bandwidth)
+        return R[:, -2, -2]
+
     @staticmethod
     def backward(ctx, grad_output):
-        '''
-        @staticmethod
-        backward(ctx, grad_output):
-        
-        Compute SoftDTW gradient wrt x. See algorithm 2 in https://arxiv.org/abs/1703.01541
-        '''
-        # Get saved tensors
-        x, y = ctx.saved_tensors
-        
-        # Determine size of alignment gradient matrix
-        E_dims = (ctx.batch_dim, ctx.x_time_dim + 2, ctx.y_time_dim + 2,  ctx.space_dim) \
-        if ctx.spatial_independent else (ctx.batch_dim, ctx.x_time_dim + 2, ctx.y_time_dim + 2)
-        
-        # Create alignment gradient matrix
-        E = torch.zeros(E_dims).to(ctx.device)
+        dev = grad_output.device
+        dtype = grad_output.dtype
+        D, R, gamma, bandwidth = ctx.saved_tensors
+
+        B = D.shape[0]
+        N = D.shape[1]
+        M = D.shape[2]
+        threads_per_block = max(N, M)
+        n_passes = 2 * threads_per_block - 1
+
+        D_ = torch.zeros((B, N + 2, M + 2), dtype=dtype, device=dev)
+        D_[:, 1:N + 1, 1:M + 1] = D
+
+        R[:, :, -1] = -math.inf
+        R[:, -1, :] = -math.inf
+        R[:, -1, -1] = R[:, -2, -2]
+
+        E = torch.zeros((B, N + 2, M + 2), dtype=dtype, device=dev)
         E[:, -1, -1] = 1
-        
-        from math import inf
-        ctx.R[torch.isinf(ctx.R)] = -inf
-        ctx.R[:,  -1,  -1] = ctx.R[:, -2, -2]
-        
-        rev_idxs   = reversed(list(MatrixDiagonalIndexIterator(ctx.x_time_dim,     ctx.y_time_dim, bandwidth=ctx.bandwidth)))
-        rev_idxsp1 = reversed(list(MatrixDiagonalIndexIterator(ctx.x_time_dim + 1, ctx.y_time_dim + 1,
-                                                               k_start = 1, bandwidth=ctx.bandwidth)))
-        rev_idxsp2 = reversed(list(MatrixDiagonalIndexIterator(ctx.x_time_dim + 2, ctx.y_time_dim + 2,
-                                                               k_start = 2, bandwidth=ctx.bandwidth)))
-        
-        # Sweep diagonally through alignment gradient matrix
-        for (i,j),(ip1,jp1),(ip2,jp2) in zip(rev_idxs, rev_idxsp1, rev_idxsp2):
-            a = torch.exp((ctx.R[:, ip2, jp1] - ctx.R[:, ip1, jp1] - ctx.D[:, ip1, j  ])/ctx.gamma)
-            b = torch.exp((ctx.R[:, ip1, jp2] - ctx.R[:, ip1, jp1] - ctx.D[:, i,   jp1])/ctx.gamma)
-            c = torch.exp((ctx.R[:, ip2, jp2] - ctx.R[:, ip1, jp1] - ctx.D[:, ip1, jp1])/ctx.gamma)
-            
-            E[:, ip1, jp1] = E[:, ip2, jp1]*a + E[:, ip1, jp2]*b +  E[:, ip2, jp2]*c
-        
-        # Compute Jacobean product to compute gradient wrt x
-        if ctx.spatial_independent:
-            G = jacobean_product_squared_euclidean(x.unsqueeze(2), y.unsqueeze(2), E[:, 1:-1, 1:-1].permute(0, 3, 2, 1)).squeeze(2)
-        else:
-            G = jacobean_product_squared_euclidean(x, y, E[:, 1:-1, 1:-1].permute(0, 2, 1))
-        
-        # Must return as many outputs as inputs to forward function
-        return G, None, None,
-    
-def softmin(x, gamma):
-    '''
-    softmin(x, gamma):
-    
-    Soft minimum function used to smooth DTW and make it differentiable
-    
-    Arguments
-        x     : list of tensors [x1, ..., xN] to compute soft-minimum over
-        gamma : smoothing parameter
-    
-    Return
-        smin_x : softmin of x
-    '''
-    # Obtain dimensions of inputs
-    dims = tuple([len(x), *x[0].shape])
-    
-    # Concatenate inputs
-    x = -torch.cat(x).reshape(dims)/gamma
-    
-    # Compute and return soft minimum
-    return -gamma * torch.logsumexp(x, dim=0)
 
-def jacobean_product_squared_euclidean(X, Y, Bt):
-    '''
-    jacobean_product_squared_euclidean(X, Y, Bt):
-    
-    Jacobean product of squared Euclidean distance matrix and alignment matrix.
-    See equations 2 and 2.5 of https://arxiv.org/abs/1703.01541
-    '''
-    ones = torch.ones(Y.shape).to('cuda' if Bt.is_cuda else 'cpu')
-    return 2 * (ones.matmul(Bt) * X - Y.matmul(Bt))
+        # Grid and block sizes are set same as done above for the forward() call
+        compute_softdtw_backward_cuda[B, threads_per_block](cuda.as_cuda_array(D_),
+                                                            cuda.as_cuda_array(R),
+                                                            1.0 / gamma.item(), bandwidth.item(), N, M, n_passes,
+                                                            cuda.as_cuda_array(E))
+        E = E[:, 1:N + 1, 1:M + 1]
+        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
 
-class MatrixDiagonalIndexIterator:
-    '''
-    Custom iterator class to return successive diagonal indices of a matrix
-    '''
-    
-    def __init__(self, m, n, k_start=0, bandwidth=None):
-        '''
-        __init__(self, m, n, k_start=0, bandwidth=None):
-        
-        Arguments:
-            m (int)         : number of rows in matrix
-            n (int)         : number of columns in matrix
-            k_start (int)   : (k_start, k_start) index to begin from
-            bandwidth (int) : bandwidth to constrain indices within
-        '''
-        self.m         = m
-        self.n         = n
-        self.k         = k_start
-        self.k_max     = self.m + self.n - k_start - 1
-        self.bandwidth = bandwidth
-        
-    def __iter__(self):
-        return self
-    
-    def __next__(self):
-        if hasattr(self, 'i') and hasattr(self, 'j'):
-            
-            if self.k == self.k_max:
-                raise StopIteration
-            
-            elif self.k < self.m and self.k < self.n:
-                self.i = self.i + [self.k]
-                self.j = [self.k] + self.j
-                self.k+=1
-            
-            elif self.k >= self.m and self.k < self.n:
-                self.j.pop(-1)
-                self.j = [self.k] + self.j
-                self.k+=1
-            
-            elif self.k < self.m and self.k >= self.n:
-                self.i.pop(0)
-                self.i = self.i + [self.k]
-                self.k+=1
-            
-            elif self.k >= self.m and self.k >= self.n:
-                self.i.pop(0)
-                self.j.pop(-1)
-                self.k+=1
 
+# ----------------------------------------------------------------------------------------------------------------------
+#
+# The following is the CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
+# Credit goes to Kanru Hua.
+# I've added support for batching and pruning.
+#
+# ----------------------------------------------------------------------------------------------------------------------
+@jit(nopython=True)
+def compute_softdtw(D, gamma, bandwidth):
+    B = D.shape[0]
+    N = D.shape[1]
+    M = D.shape[2]
+    R = np.ones((B, N + 2, M + 2)) * np.inf
+    R[:, 0, 0] = 0
+    for b in range(B):
+        for j in range(1, M + 1):
+            for i in range(1, N + 1):
+
+                # Check the pruning condition
+                if 0 < bandwidth < np.abs(i - j):
+                    continue
+
+                r0 = -R[b, i - 1, j - 1] / gamma
+                r1 = -R[b, i - 1, j] / gamma
+                r2 = -R[b, i, j - 1] / gamma
+                rmax = max(max(r0, r1), r2)
+                rsum = np.exp(r0 - rmax) + np.exp(r1 - rmax) + np.exp(r2 - rmax)
+                softmin = - gamma * (np.log(rsum) + rmax)
+                R[b, i, j] = D[b, i - 1, j - 1] + softmin
+    return R
+
+# ----------------------------------------------------------------------------------------------------------------------
+@jit(nopython=True)
+def compute_softdtw_backward(D_, R, gamma, bandwidth):
+    B = D_.shape[0]
+    N = D_.shape[1]
+    M = D_.shape[2]
+    D = np.zeros((B, N + 2, M + 2))
+    E = np.zeros((B, N + 2, M + 2))
+    D[:, 1:N + 1, 1:M + 1] = D_
+    E[:, -1, -1] = 1
+    R[:, :, -1] = -np.inf
+    R[:, -1, :] = -np.inf
+    R[:, -1, -1] = R[:, -2, -2]
+    for k in range(B):
+        for j in range(M, 0, -1):
+            for i in range(N, 0, -1):
+
+                if np.isinf(R[k, i, j]):
+                    R[k, i, j] = -np.inf
+
+                # Check the pruning condition
+                if 0 < bandwidth < np.abs(i - j):
+                    continue
+
+                a0 = (R[k, i + 1, j] - R[k, i, j] - D[k, i + 1, j]) / gamma
+                b0 = (R[k, i, j + 1] - R[k, i, j] - D[k, i, j + 1]) / gamma
+                c0 = (R[k, i + 1, j + 1] - R[k, i, j] - D[k, i + 1, j + 1]) / gamma
+                a = np.exp(a0)
+                b = np.exp(b0)
+                c = np.exp(c0)
+                E[k, i, j] = E[k, i + 1, j] * a + E[k, i, j + 1] * b + E[k, i + 1, j + 1] * c
+    return E[:, 1:N + 1, 1:M + 1]
+
+# ----------------------------------------------------------------------------------------------------------------------
+class _SoftDTW(Function):
+    """
+    CPU implementation based on https://github.com/Sleepwalking/pytorch-softdtw
+    """
+
+    @staticmethod
+    def forward(ctx, D, gamma, bandwidth):
+        dev = D.device
+        dtype = D.dtype
+        gamma = torch.Tensor([gamma]).to(dev).type(dtype)  # dtype fixed
+        bandwidth = torch.Tensor([bandwidth]).to(dev).type(dtype)
+        D_ = D.detach().cpu().numpy()
+        g_ = gamma.item()
+        b_ = bandwidth.item()
+        R = torch.Tensor(compute_softdtw(D_, g_, b_)).to(dev).type(dtype)
+        ctx.save_for_backward(D, R, gamma, bandwidth)
+        return R[:, -2, -2]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        dev = grad_output.device
+        dtype = grad_output.dtype
+        D, R, gamma, bandwidth = ctx.saved_tensors
+        D_ = D.detach().cpu().numpy()
+        R_ = R.detach().cpu().numpy()
+        g_ = gamma.item()
+        b_ = bandwidth.item()
+        E = torch.Tensor(compute_softdtw_backward(D_, R_, g_, b_)).to(dev).type(dtype)
+        return grad_output.view(-1, 1, 1).expand_as(E) * E, None, None
+
+# ----------------------------------------------------------------------------------------------------------------------
+class SoftDTW(torch.nn.Module):
+    """
+    The soft DTW implementation that optionally supports CUDA
+    """
+
+    def __init__(self, use_cuda, gamma=1.0, normalize=False, bandwidth=None, dist_func=None):
+        """
+        Initializes a new instance using the supplied parameters
+        :param use_cuda: Flag indicating whether the CUDA implementation should be used
+        :param gamma: sDTW's gamma parameter
+        :param normalize: Flag indicating whether to perform normalization
+                          (as discussed in https://github.com/mblondel/soft-dtw/issues/10#issuecomment-383564790)
+        :param bandwidth: Sakoe-Chiba bandwidth for pruning. Passing 'None' will disable pruning.
+        :param dist_func: Optional point-wise distance function to use. If 'None', then a default Euclidean distance function will be used.
+        """
+        super(SoftDTW, self).__init__()
+        self.normalize = normalize
+        self.gamma = gamma
+        self.bandwidth = 0 if bandwidth is None else float(bandwidth)
+        self.use_cuda = use_cuda
+
+        # Set the distance function
+        if dist_func is not None:
+            self.dist_func = dist_func
         else:
-            self.i = [self.k]
-            self.j = [self.k]
-            self.k+=1
-        
-        if self.bandwidth:
-            i_scb, j_scb = sakoe_chiba_band(self.i.copy(), self.j.copy(), self.m, self.n, bandwidth)
-            return i_scb, j_scb
+            self.dist_func = SoftDTW._euclidean_dist_func
+
+    def _get_func_dtw(self, x, y):
+        """
+        Checks the inputs and selects the proper implementation to use.
+        """
+        bx, lx, dx = x.shape
+        by, ly, dy = y.shape
+        # Make sure the dimensions match
+        assert bx == by  # Equal batch sizes
+        assert dx == dy  # Equal feature dimensions
+
+        use_cuda = self.use_cuda
+
+        if use_cuda and (lx > 1024 or ly > 1024):  # We should be able to spawn enough threads in CUDA
+                print("SoftDTW: Cannot use CUDA because the sequence length > 1024 (the maximum block size supported by CUDA)")
+                use_cuda = False
+
+        # Finally, return the correct function
+        return _SoftDTWCUDA.apply if use_cuda else _SoftDTW.apply
+
+    @staticmethod
+    def _euclidean_dist_func(x, y):
+        """
+        Calculates the Euclidean distance between each element in x and y per timestep
+        """
+        n = x.size(1)
+        m = y.size(1)
+        d = x.size(2)
+        x = x.unsqueeze(2).expand(-1, n, m, d)
+        y = y.unsqueeze(1).expand(-1, n, m, d)
+        return torch.pow(x - y, 2).sum(3)
+
+    def forward(self, X, Y):
+        """
+        Compute the soft-DTW value between X and Y
+        :param X: One batch of examples, batch_size x seq_len x dims
+        :param Y: The other batch of examples, batch_size x seq_len x dims
+        :return: The computed results
+        """
+
+        # Check the inputs and get the correct implementation
+        func_dtw = self._get_func_dtw(X, Y)
+
+        if self.normalize:
+            # Stack everything up and run
+            x = torch.cat([X, X, Y])
+            y = torch.cat([Y, X, Y])
+            D = self.dist_func(x, y)
+            out = func_dtw(D, self.gamma, self.bandwidth)
+            out_xy, out_xx, out_yy = torch.split(out, X.shape[0])
+            return out_xy - 1 / 2 * (out_xx + out_yy)
         else:
-            return self.i.copy(), self.j.copy()
-    
-def sakoe_chiba_band(i_list, j_list, m, n, bandwidth=1):
-    i_scb, j_scb = zip(*[(i, j) for i,j in zip(i_list, j_list) 
-                         if abs(2*(i*(n-1) - j*(m-1))) < max(m, n)*(bandwidth+1)])
-    return list(i_scb), list(j_scb)
+            D_xy = self.dist_func(X, Y)
+            return func_dtw(D_xy, self.gamma, self.bandwidth)
+
+# ----------------------------------------------------------------------------------------------------------------------
+def timed_run(a, b, sdtw):
+    """
+    Runs a and b through sdtw, and times the forward and backward passes.
+    Assumes that a requires gradients.
+    :return: timing, forward result, backward result
+    """
+    from timeit import default_timer as timer
+
+    # Forward pass
+    start = timer()
+    forward = sdtw(a, b)
+    end = timer()
+    t = end - start
+
+    grad_outputs = torch.ones_like(forward)
+
+    # Backward
+    start = timer()
+    grads = torch.autograd.grad(forward, a, grad_outputs=grad_outputs)[0]
+    end = timer()
+
+    # Total time
+    t += end - start
+
+    return t, forward, grads
+
+# ----------------------------------------------------------------------------------------------------------------------
+def profile(batch_size, seq_len_a, seq_len_b, dims, tol_backward):
+    sdtw = SoftDTW(False, gamma=1.0, normalize=False)
+    sdtw_cuda = SoftDTW(True, gamma=1.0, normalize=False)
+    n_iters = 6
+
+    print("Profiling forward() + backward() times for batch_size={}, seq_len_a={}, seq_len_b={}, dims={}...".format(batch_size, seq_len_a, seq_len_b, dims))
+
+    times_cpu = []
+    times_gpu = []
+
+    for i in range(n_iters):
+        a_cpu = torch.rand((batch_size, seq_len_a, dims), requires_grad=True)
+        b_cpu = torch.rand((batch_size, seq_len_b, dims))
+        a_gpu = a_cpu.cuda()
+        b_gpu = b_cpu.cuda()
+
+        # GPU
+        t_gpu, forward_gpu, backward_gpu = timed_run(a_gpu, b_gpu, sdtw_cuda)
+
+        # CPU
+        t_cpu, forward_cpu, backward_cpu = timed_run(a_cpu, b_cpu, sdtw)
+
+        # Verify the results
+        assert torch.allclose(forward_cpu, forward_gpu.cpu())
+        assert torch.allclose(backward_cpu, backward_gpu.cpu(), atol=tol_backward)
+
+        if i > 0:  # Ignore the first time we run, in case this is a cold start (because timings are off at a cold start of the script)
+            times_cpu += [t_cpu]
+            times_gpu += [t_gpu]
+
+    # Average and log
+    avg_cpu = np.mean(times_cpu)
+    avg_gpu = np.mean(times_gpu)
+    print("\tCPU:     ", avg_cpu)
+    print("\tGPU:     ", avg_gpu)
+    print("\tSpeedup: ", avg_cpu / avg_gpu)
+    print()
+
+# ----------------------------------------------------------------------------------------------------------------------
+if __name__ == "__main__":
+    from timeit import default_timer as timer
+
+    torch.manual_seed(1234)
+
+    profile(128, 17, 15, 2, tol_backward=1e-6)
+    profile(512, 64, 64, 2, tol_backward=1e-4)
+    profile(512, 256, 256, 2, tol_backward=1e-3)

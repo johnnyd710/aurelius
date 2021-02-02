@@ -3,7 +3,7 @@ import torch
 from torch.autograd import Function
 from math import inf
 
-def sine_data_generation (no, seq_len, dim, frequency = [0, 1], phase = [0, 1]):
+def sine_data_generation (no, seq_len, dim, frequency = [0, 1], phase = [0, 7]):
   """Sine data generation.
   
   Args:
